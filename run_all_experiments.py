@@ -31,6 +31,7 @@ RANDOM_SEED = 42
 EPOCHS = 50
 LEARNING_RATE = 0.001
 INPUT_SHAPE = (10, 6)
+EPSILON = 1e-10  # 防止除零的小量
 
 # 数据集配置
 DATASETS = {
@@ -265,64 +266,37 @@ def train_mssb_tl(data, finetuned_models):
     test_pred = best_model.predict(data['X_target_test'], verbose=0).flatten()
     return calculate_rmse(data['y_target_test'], test_pred)
 
-def train_msml_tl(data, weights):
-    """MSML-TL: 多源多层融合 (同源初始化)"""
-    callbacks = [
-        EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
-    ]
-    
-    # 创建基础模型保存初始权重
-    base_model = build_cnn_functional()
-    initial_weights = base_model.get_weights()
-    
-    # 从相同初始权重训练各源域模型
-    src_models_weights = []
-    for src in data['sources']:
-        model = build_cnn_functional()
-        model.set_weights(initial_weights)
-        
-        model.fit(
-            src['X_train'], src['y_train'],
-            validation_data=(src['X_val'], src['y_val']),
-            epochs=EPOCHS // 2,
-            batch_size=32,
-            callbacks=callbacks,
-            verbose=0
-        )
-        
-        src_models_weights.append(model.get_weights())
-    
-    # 加权融合网络参数
-    w = weights[:len(src_models_weights)]
-    fused_weights = []
-    for layer_idx in range(len(initial_weights)):
-        layer_ws = [mw[layer_idx] for mw in src_models_weights]
-        fused = np.zeros_like(layer_ws[0])
-        for weight, layer_w in zip(w, layer_ws):
-            fused += weight * layer_w
-        fused_weights.append(fused)
-    
-    # 微调融合模型
-    model = build_cnn_functional()
-    model.set_weights(fused_weights)
-    
-    for layer in model.layers:
-        if 'conv' in layer.name or 'maxpool' in layer.name:
-            layer.trainable = False
-    
-    model.compile(optimizer=get_adam_optimizer(LEARNING_RATE * 0.1), loss='mse')
-    model.fit(
-        data['X_target_train'], data['y_target_train'],
-        validation_data=(data['X_target_val'], data['y_target_val']),
-        epochs=EPOCHS,
-        batch_size=min(8, len(data['X_target_train'])),
-        callbacks=callbacks,
-        verbose=0
-    )
-    
-    preds = model.predict(data['X_target_test'], verbose=0).flatten()
-    return calculate_rmse(data['y_target_test'], preds)
+def train_msadw_tl(data, finetuned_models):
+    """MSADW-TL: 多源自适应动态加权 (路线 A: 预测层集成 + 静态反比加权)
+
+    放弃参数层融合（直接揉捏卷积核会破坏特征提取能力），
+    改为在 3 个已微调模型的"最终预测结果"上施加自适应权重。
+    权重由路线 A（静态反比加权公式）根据目标域验证集 RMSE 计算：
+        w_i = (1 / RMSE_i) / sum(1 / RMSE_j)
+    验证集 RMSE 越小的模型获得越高的权重。
+    """
+    # 计算各模型在目标域验证集上的 RMSE
+    val_rmses = []
+    for model in finetuned_models:
+        val_pred = model.predict(data['X_target_val'], verbose=0).flatten()
+        val_rmse = calculate_rmse(data['y_target_val'], val_pred)
+        val_rmses.append(val_rmse)
+
+    # 路线 A: 静态反比加权 (加小量 EPSILON 防止除零)
+    inv_rmses = np.array([1.0 / (r + EPSILON) for r in val_rmses])
+    weights = inv_rmses / inv_rmses.sum()
+    print(f"  自适应权重 (验证集反比加权): {[f'{w:.4f}' for w in weights]}")
+
+    # 预测层集成：对测试集预测结果加权求和
+    test_preds = []
+    for model in finetuned_models:
+        pred = model.predict(data['X_target_test'], verbose=0).flatten()
+        test_preds.append(pred)
+
+    test_preds = np.array(test_preds)
+    weighted_pred = np.sum(test_preds * weights.reshape(-1, 1), axis=0)
+
+    return calculate_rmse(data['y_target_test'], weighted_pred)
 
 # ==========================================
 # 主评估函数
@@ -361,10 +335,10 @@ def evaluate_dataset(dataset_name, data_dir, weights):
     results['MSSB-TL'] = train_mssb_tl(data, finetuned_models)
     print(f"  MSSB-TL RMSE: {results['MSSB-TL']:.4f}")
     
-    # 5. MSML-TL
-    print("[5/5] 运行 MSML-TL (同源初始化)...")
-    results['MSML-TL'] = train_msml_tl(data, weights)
-    print(f"  MSML-TL RMSE: {results['MSML-TL']:.4f}")
+    # 5. MSADW-TL
+    print("[5/5] 运行 MSADW-TL (自适应预测层集成, 路线 A 反比加权)...")
+    results['MSADW-TL'] = train_msadw_tl(data, finetuned_models)
+    print(f"  MSADW-TL RMSE: {results['MSADW-TL']:.4f}")
     
     return results
 
@@ -410,7 +384,7 @@ def main():
     print(separator)
     
     # 各方法行
-    methods = ['No-TL', 'SS-TL', 'MSWA-TL', 'MSSB-TL', 'MSML-TL']
+    methods = ['No-TL', 'SS-TL', 'MSWA-TL', 'MSSB-TL', 'MSADW-TL']
     for method in methods:
         row = f"| {method} |"
         for ds, results in all_results.items():

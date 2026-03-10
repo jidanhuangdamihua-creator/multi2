@@ -16,7 +16,7 @@
 ### 2.2 核心实验脚本
 - `run_all_experiments.py`
   - 统一遍历三个数据集：`processed_data`、`processed_data_dataset2`、`processed_data_dataset3`
-  - 统一评估五种方法：No-TL、SS-TL、MSWA-TL、MSSB-TL、MSML-TL
+  - 统一评估五种方法：No-TL、SS-TL、MSWA-TL、MSSB-TL、MSADW-TL
   - 输出：终端中的跨数据集汇总表（RMSE、提升百分比、最佳方法、总体统计）
 
 ---
