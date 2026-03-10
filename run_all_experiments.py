@@ -31,6 +31,7 @@ RANDOM_SEED = 42
 EPOCHS = 50
 LEARNING_RATE = 0.001
 INPUT_SHAPE = (10, 6)
+EPSILON = 1e-10  # 防止除零的小量
 
 # 数据集配置
 DATASETS = {
@@ -281,8 +282,8 @@ def train_msadw_tl(data, finetuned_models):
         val_rmse = calculate_rmse(data['y_target_val'], val_pred)
         val_rmses.append(val_rmse)
 
-    # 路线 A: 静态反比加权 (加小量 epsilon 防止除零)
-    inv_rmses = np.array([1.0 / (r + 1e-10) for r in val_rmses])
+    # 路线 A: 静态反比加权 (加小量 EPSILON 防止除零)
+    inv_rmses = np.array([1.0 / (r + EPSILON) for r in val_rmses])
     weights = inv_rmses / inv_rmses.sum()
     print(f"  自适应权重 (验证集反比加权): {[f'{w:.4f}' for w in weights]}")
 
